@@ -214,6 +214,10 @@ To extract financial requirements (Tender Fee, EMD), official RFP / BOQ document
 #### A. Enrich Existing Saved Database Records (`--fetch-details`)
 If you already have tenders stored in `tenders.db` and want to enrich them with full financial and document details:
 ```bash
+# Enrich tenders for a specific source (e.g. states, central) and export to file
+python3 cli.py --fetch-details --source states --output state_it_tenders.csv
+python3 cli.py --fetch-details --source central --output central_it_tenders.csv
+
 # Enrich the first 5 tenders that need details
 python3 cli.py --fetch-details --limit 5
 
@@ -221,14 +225,27 @@ python3 cli.py --fetch-details --limit 5
 python3 cli.py --fetch-details
 
 # Enrich a specific tender by its ID
-python3 cli.py --fetch-details --tender-id "2026_TCIL_290724_1"
+python3 cli.py --fetch-details --tender-id "2026_NICSI_288631_1"
 ```
 During enrichment:
 - Each tender's CAPTCHA is automatically downloaded and displayed in macOS Preview.
 - Enter the code in the terminal (or `'s'` to skip, `'r'` to refresh, `'q'` to quit).
-- Tenders are immediately updated in SQLite and re-exported to CSV/JSON.
+- Tenders are immediately updated in SQLite and exported to the specified `--output` file. If all records for the source are already enriched, it exports the CSV immediately.
 
-#### B. Live Detail Extraction During Scraping (`--details`)
+#### B. Direct Database Export (`--export`)
+To export previously scraped and enriched tenders from SQLite to CSV/JSON at any time without running scraper or CAPTCHA requests:
+```bash
+# Export state tenders only
+python3 cli.py --export --source states --output state_it_tenders.csv
+
+# Export central tenders only
+python3 cli.py --export --source central --output central_it_tenders.csv
+
+# Export all tenders across all sources
+python3 cli.py --export --source all --output all_it_tenders.csv
+```
+
+#### C. Live Detail Extraction During Scraping (`--details`)
 To scrape categories and immediately prompt for details on each matching IT tender:
 ```bash
 python3 cli.py --mode category --source central --category "Info. Tech. Services" --pages 1 --details

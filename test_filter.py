@@ -436,6 +436,56 @@ class TestITScraper(unittest.TestCase):
         self.assertEqual(legit["tender_fee"], "1,000")
         self.assertEqual(legit["work_description"], "Legitimate work description for IT project")
 
+    def test_source_filtering_and_export(self):
+        # Insert 1 central and 1 state tender
+        self.storage.save_tender({
+            "tender_id": "SRC_C_01",
+            "title": "Central IT Tender",
+            "tender_ref_no": "C/2026/01",
+            "organisation": "NIC",
+            "published_date": "10-Sep-2026",
+            "closing_date": "30-Sep-2026",
+            "opening_date": "01-Oct-2026",
+            "tender_url": "https://eprocure.gov.in/c",
+            "source": "central",
+            "is_it_tender": True
+        })
+        self.storage.save_tender({
+            "tender_id": "SRC_S_01",
+            "title": "State IT Tender",
+            "tender_ref_no": "S/2026/01",
+            "organisation": "Punjab State",
+            "published_date": "10-Sep-2026",
+            "closing_date": "30-Sep-2026",
+            "opening_date": "01-Oct-2026",
+            "tender_url": "https://eprocure.gov.in/s",
+            "source": "states",
+            "is_it_tender": True
+        })
+
+        # Test filtering by source
+        central_tenders = self.storage.get_tenders(source="central")
+        self.assertEqual(len(central_tenders), 1)
+        self.assertEqual(central_tenders[0]["tender_id"], "SRC_C_01")
+
+        state_tenders = self.storage.get_tenders(source="states")
+        self.assertEqual(len(state_tenders), 1)
+        self.assertEqual(state_tenders[0]["tender_id"], "SRC_S_01")
+
+        gem_tenders = self.storage.get_tenders(source="gem")
+        self.assertEqual(len(gem_tenders), 0)
+
+        # Test export with source filtering
+        csv_path = "test_out.csv"
+        exp_count = self.storage.export_to_csv(csv_path, source="states")
+        self.assertEqual(exp_count, 1)
+
+        import csv
+        with open(csv_path) as f:
+            rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["source"], "states")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -124,6 +124,11 @@ def main():
         help="Display current database statistics and exit"
     )
     parser.add_argument(
+        "--export",
+        action="store_true",
+        help="Export stored database tenders to CSV or JSON (optionally filtered by --source) and exit"
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable detailed debug logging"
@@ -150,9 +155,25 @@ def main():
         print(f"Total Tenders Stored : {stats['total_tenders']:,}")
         print(f"IT Tenders Stored     : {stats['it_tenders']:,}")
         print(f"Details Enriched      : {stats.get('details_fetched', 0):,}")
+        print("\nBreakdown by Source:")
+        for src_name, count in stats.get("sources", {}).items():
+            print(f"  - {src_name:15s}: {count}")
         print("\nBreakdown by IT Category:")
         for cat, count in stats["categories"].items():
             print(f"  - {cat:32s}: {count}")
+        return
+
+    if args.export:
+        export_path = args.output
+        src = args.source if args.source != "all" else None
+        if export_path.endswith(".json"):
+            exported_count = storage.export_to_json(export_path, only_it=True, source=src)
+        else:
+            if not export_path.endswith(".csv"):
+                export_path += ".csv"
+            exported_count = storage.export_to_csv(export_path, only_it=True, source=src)
+        src_label = f" ({args.source})" if src else ""
+        print(f"[✓] Exported {exported_count}{src_label} IT tender(s) to {export_path}")
         return
 
     custom_kw = [k.strip() for k in args.keywords.split(",")] if args.keywords else None
@@ -161,11 +182,25 @@ def main():
     if args.fetch_details:
         # Reset any corrupt records that were marked fetched with empty details
         storage.reset_unpopulated_details()
+        src = args.source if args.source != "all" else None
+
+        total_for_source = len(storage.get_tenders(only_it=True, source=src))
+        if total_for_source == 0:
+            if src == "gem":
+                print("[*] No GeM bids found in the database yet.")
+                print("    To scrape GeM bids from CPPP, run:")
+                print("    python3 cli.py --source gem --details --output gem_it_tenders.csv")
+            else:
+                print(f"[*] No {args.source.title()} tenders found in the database to enrich.")
+                print(f"    To scrape {args.source.title()} tenders, run:")
+                print(f"    python3 cli.py --source {args.source}")
+            return
 
         tenders_to_enrich = storage.get_tenders(
             only_it=True,
             needs_details_only=True,
             tender_id=args.tender_id,
+            source=src,
             limit=args.limit
         )
 
@@ -173,10 +208,20 @@ def main():
             if args.tender_id:
                 print(f"[*] No pending details needed for Tender ID '{args.tender_id}'.")
             else:
-                print("[*] All IT tenders in database already have details enriched (or none match).")
+                print(f"[*] All {args.source.title()} IT tenders in database ({total_for_source} records) already have details enriched.")
+
+            # Export the records for this source to the requested output file
+            export_path = args.output
+            if export_path.endswith(".json"):
+                exported_count = storage.export_to_json(export_path, only_it=True, source=src)
+            else:
+                if not export_path.endswith(".csv"):
+                    export_path += ".csv"
+                exported_count = storage.export_to_csv(export_path, only_it=True, source=src)
+            print(f"[✓] Exported {exported_count} enriched {args.source} records to {export_path}")
             return
 
-        print(f"[*] Found {len(tenders_to_enrich)} tender(s) needing detail enrichment.")
+        print(f"[*] Found {len(tenders_to_enrich)} {args.source} tender(s) needing detail enrichment.")
         print("[*] Interactive mode: Preview opens CAPTCHA image, enter solution in terminal.")
         print("    [code] = submit, 'r' = refresh, 's' = skip tender, 'q' = quit\n")
 
@@ -229,11 +274,11 @@ def main():
         # Export updated records
         export_path = args.output
         if export_path.endswith(".json"):
-            exported_count = storage.export_to_json(export_path, only_it=True)
+            exported_count = storage.export_to_json(export_path, only_it=True, source=src)
         else:
             if not export_path.endswith(".csv"):
                 export_path += ".csv"
-            exported_count = storage.export_to_csv(export_path, only_it=True)
+            exported_count = storage.export_to_csv(export_path, only_it=True, source=src)
 
         print("\n" + "=" * 60)
         print("               ENRICHMENT SUMMARY")

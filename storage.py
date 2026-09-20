@@ -254,9 +254,10 @@ class TenderStorage:
         only_it: bool = True,
         needs_details_only: bool = False,
         tender_id: Optional[str] = None,
+        source: Optional[str] = None,
         limit: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Retrieve tenders from SQLite."""
+        """Retrieve tenders from SQLite with optional filters."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -266,6 +267,9 @@ class TenderStorage:
                 query += " AND is_it_tender = 1"
             if needs_details_only:
                 query += " AND (details_fetched IS NULL OR details_fetched = 0)"
+            if source and source != "all":
+                query += " AND source = ?"
+                params.append(source)
             if tender_id:
                 query += " AND tender_id = ?"
                 params.append(tender_id)
@@ -289,6 +293,9 @@ class TenderStorage:
             cursor.execute("SELECT COUNT(*) FROM tenders WHERE details_fetched = 1")
             details_count = cursor.fetchone()[0]
 
+            cursor.execute("SELECT source, COUNT(*) FROM tenders GROUP BY source")
+            source_counts = dict(cursor.fetchall())
+
             cursor.execute("SELECT categories FROM tenders WHERE is_it_tender = 1 AND categories != ''")
             category_counts: Dict[str, int] = {}
             for (cats,) in cursor.fetchall():
@@ -301,12 +308,13 @@ class TenderStorage:
                 "total_tenders": total,
                 "it_tenders": it_count,
                 "details_fetched": details_count,
+                "sources": source_counts,
                 "categories": category_counts
             }
 
-    def export_to_csv(self, filepath: str, only_it: bool = True) -> int:
+    def export_to_csv(self, filepath: str, only_it: bool = True, source: Optional[str] = None) -> int:
         """Export stored tenders to a CSV file. Returns number of rows exported."""
-        tenders = self.get_tenders(only_it=only_it)
+        tenders = self.get_tenders(only_it=only_it, source=source)
         fields = [
             "tender_id", "title", "tender_ref_no", "organisation",
             "tender_fee", "emd", "tender_document_url", "work_description",
@@ -332,9 +340,9 @@ class TenderStorage:
 
         return len(tenders)
 
-    def export_to_json(self, filepath: str, only_it: bool = True) -> int:
+    def export_to_json(self, filepath: str, only_it: bool = True, source: Optional[str] = None) -> int:
         """Export stored tenders to a JSON file."""
-        tenders = self.get_tenders(only_it=only_it)
+        tenders = self.get_tenders(only_it=only_it, source=source)
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(tenders, f, indent=2, ensure_ascii=False)
         return len(tenders)
