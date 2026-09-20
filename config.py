@@ -26,15 +26,27 @@ SOURCES = {
     },
 }
 
-# Regex pattern to automatically identify IT / Tech categories from portal dropdown options
+# Explicitly excluded portal categories (Hardware, Telecom, Network equipment, OFC)
+EXCLUDED_PORTAL_CATEGORIES = [
+    "Computer Hardware",
+    "Network /Communication Equipments",
+    "Information Technology/Telecom",
+    "OFC Laying Works",
+]
+
+# Regex pattern to automatically identify software, IT services, and digitization categories
 IT_CATEGORY_REGEX = re.compile(
-    r"\b(IT|Tech|Technology|Computer|Software|Hardware|Network|Networking|Digitisation|Digitization|Data Processing|Telecom|Telecommunication|OFC)\b",
+    r"\b(IT|Tech|Technology|Computer|Software|Digitisation|Digitization|Data Processing)\b",
     re.IGNORECASE
 )
 
 
 def is_it_category(category_name: str) -> bool:
     """Check if a portal product category string is relevant to IT / Tech."""
+    norm = category_name.strip().lower()
+    for exc in EXCLUDED_PORTAL_CATEGORIES:
+        if exc.lower() in norm:
+            return False
     return bool(IT_CATEGORY_REGEX.search(category_name))
 
 
@@ -47,16 +59,12 @@ def filter_it_categories(category_list: List[str]) -> List[str]:
 IT_PRODUCT_CATEGORIES = [
     "Info. Tech. Services",
     "Information Technology (IT)",
-    "Information Technology/Telecom",
     "IT Services",
     "IT - All",
     "IT",
     "Computer Software/Web Site",
-    "Computer Hardware",
     "Computer Data Processing",
-    "Network /Communication Equipments",
     "Scanning, Digitisation Services",
-    "OFC Laying Works",
 ]
 
 # Keywords for searching GeM bids
@@ -64,7 +72,6 @@ GEM_IT_KEYWORDS = [
     "Information Technology",
     "IT Services",
     "Computer Software",
-    "Computer Hardware",
 ]
 
 # Standard HTTP headers mimicking desktop browser
@@ -112,9 +119,8 @@ IT_CATEGORIES = {
         "networking", "lan ", "wan ", "sd-wan", "network switch", "router",
         "firewall", "utm ", "siem", "soc ", "antivirus", "cyber security",
         "cybersecurity", "penetration testing", "vapt", "vulnerability assessment",
-        "ids/ips", "ssl certificate", "vpn", "optical fiber", "ofc cable",
-        "ofc laying", "leased line", "internet bandwidth", "wi-fi", "wifi",
-        "structured cabling", "network rack", "network security"
+        "ids/ips", "ssl certificate", "vpn", "leased line", "internet bandwidth",
+        "wi-fi", "wifi", "structured cabling", "network rack", "network security"
     ],
     "Hardware & Computing": [
         "computer", "computers", "desktop", "desktops", "desktop computer",
@@ -189,5 +195,8 @@ EXCLUSION_KEYWORDS = [
     "medical waste", "surgical items", "pathology reagents",
     "supply of bricks", "supply of sand", "cement supply",
     "cc road", "naali nirman", "sadak nirman", "nirman karya",
-    "marammat karya", "interlocking", "kharanja"
+    "marammat karya", "interlocking", "kharanja",
+    "ofc laying", "laying of ofc", "ofc cable laying", "optical fiber cable laying",
+    "ofc work", "ofc cable work", "laying of optical fiber", "trenching",
+    "hdd boring", "cable laying work"
 ]

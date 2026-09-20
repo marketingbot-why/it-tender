@@ -13,6 +13,8 @@ from bs4 import BeautifulSoup
 
 from config import (
     BASE_URL,
+    CPPP_CENTRAL_URL,
+    CPPP_STATES_URL,
     SOURCES,
     DEFAULT_HEADERS,
     DEFAULT_TIMEOUT,
@@ -42,6 +44,28 @@ class EprocureScraper:
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
         self.it_filter = ITFilter(custom_keywords=custom_keywords)
+        self._active_sessions = set()
+
+    def ensure_session(self, portal: str = "central") -> bool:
+        """
+        Ensure the session has established the necessary Drupal session cookie (SSESS...)
+        by visiting the corresponding portal listing page.
+        """
+        if portal in self._active_sessions and any(k.startswith("SSESS") for k in self.session.cookies.keys()):
+            return True
+
+        url = CPPP_STATES_URL if portal == "states" else CPPP_CENTRAL_URL
+        headers = dict(DEFAULT_HEADERS)
+        headers["Referer"] = url
+        try:
+            resp = self.session.get(url, headers=headers, timeout=self.timeout)
+            if resp.status_code == 200:
+                self._active_sessions.add(portal)
+                logger.debug(f"Established portal session for {portal}: {dict(self.session.cookies)}")
+                return True
+        except Exception as e:
+            logger.warning(f"Unable to establish {portal} portal session: {e}")
+        return False
 
     def build_page_url(self, source_url: str, page: int) -> str:
         """Generate base64 obfuscated page URL used by CPPP Drupal views."""
@@ -66,6 +90,25 @@ class EprocureScraper:
                             return f"{base_url}{href}"
                         return href
         return None
+
+    @staticmethod
+    def refresh_tender_url(url: str) -> str:
+        """
+        Refresh the timestamp nonce in a CPPP detail URL so it never expires.
+        CPPP uses 6 base64 segments separated by 'A13h1', where the 4th segment is the unix timestamp.
+        """
+        if not url or "tendersfullview" not in url or "A13h1" not in url:
+            return url
+        try:
+            prefix, slug = url.rsplit("/", 1)
+            parts = slug.split("A13h1")
+            if len(parts) >= 4:
+                current_ts_b64 = base64.b64encode(str(int(time.time())).encode("utf-8")).decode("utf-8")
+                parts[3] = current_ts_b64
+                return f"{prefix}/{'A13h1'.join(parts)}"
+        except Exception as err:
+            logger.debug(f"Unable to refresh timestamp nonce on {url}: {err}")
+        return url
 
     def fetch_page_html(self, url: str) -> Optional[str]:
         """Fetch raw HTML with retry backoff."""
@@ -257,6 +300,277 @@ class EprocureScraper:
             return False, html, err_text
 
         return True, html, None
+
+    def parse_tender_details_html(self, html: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse structured tender details (Tender Fee, EMD, Document URL, Work Description,
+        Critical Dates, Authority info) from CPPP or GeM fullview HTML.
+        Returns None if no details tables or valid tender metadata were found.
+        """
+        if not html:
+            return None
+
+        # Check for immediate failure markers
+        if "Invalid parameter" in html or "Invalid Url" in html:
+            return None
+
+        soup = BeautifulSoup(html, "html.parser")
+        raw_pairs = {}
+        doc_links = []
+
+        # Parse all table rows for key-value pairs and document links
+        for tr in soup.find_all("tr"):
+            cells = tr.find_all(["td", "th"])
+            if not cells:
+                continue
+
+            # Look for document/attachment links in row
+            for a in tr.find_all("a"):
+                href = a.get("href", "").strip()
+                text = a.get_text(strip=True)
+                if href and not href.startswith("javascript:"):
+                    resolved_href = href
+                    if "/cppp/tenderredirect/by/" in href:
+                        token = href.split("/cppp/tenderredirect/by/")[-1].strip()
+                        try:
+                            resolved_href = base64.b64decode(token).decode("utf-8", errors="ignore")
+                        except Exception:
+                            pass
+                    doc_links.append({"text": text, "url": resolved_href})
+
+            i = 0
+            while i < len(cells):
+                # Pattern: [Key, ':', Value] or [Key1, ':', Val1, Key2, ':', Val2]
+                if i + 2 < len(cells) and cells[i+1].get_text(strip=True) == ":":
+                    k = cells[i].get_text(strip=True).rstrip("*").strip()
+                    v = cells[i+2].get_text(strip=True)
+                    link = cells[i+2].find("a")
+                    if link and link.get("href"):
+                        raw_pairs[k + "_link"] = link.get("href")
+                    raw_pairs[k] = v
+                    i += 3
+                elif i + 1 < len(cells):
+                    # Pattern: [Key, Value]
+                    k = cells[i].get_text(strip=True).rstrip(":").rstrip("*").strip()
+                    v = cells[i+1].get_text(strip=True)
+                    link = cells[i+1].find("a")
+                    if link and link.get("href"):
+                        raw_pairs[k + "_link"] = link.get("href")
+                    raw_pairs[k] = v
+                    i += 2
+                else:
+                    i += 1
+
+        # Extract and resolve tender document URL
+        tender_doc_url = None
+        doc_val = raw_pairs.get("Tender Document_link") or raw_pairs.get("Bid Document_link")
+        if doc_val:
+            if "/cppp/tenderredirect/by/" in doc_val:
+                token = doc_val.split("/cppp/tenderredirect/by/")[-1].strip()
+                try:
+                    tender_doc_url = base64.b64decode(token).decode("utf-8", errors="ignore")
+                except Exception:
+                    tender_doc_url = doc_val
+            else:
+                tender_doc_url = doc_val
+        elif raw_pairs.get("Tender Document"):
+            tender_doc_url = raw_pairs.get("Tender Document")
+        elif raw_pairs.get("Bid Document"):
+            tender_doc_url = raw_pairs.get("Bid Document")
+
+        if not tender_doc_url and doc_links:
+            for dl in doc_links:
+                u = dl["url"]
+                if any(ext in u.lower() for ext in [".pdf", ".zip", ".xls", "doc_cppp", "eproc", "tender", "redirect", "bidplus"]):
+                    tender_doc_url = u
+                    break
+
+        # If no key-value pairs and no doc links were found, it's not a detail page
+        if not raw_pairs and not doc_links:
+            return None
+
+        # Ensure at least one substantive field was captured
+        substantive_keys = [
+            "Tender Fee", "Tender Fee in ₹", "EMD", "EMD Amount in ₹",
+            "Work Description", "Tender Title", "Product Category",
+            "Name", "Buyer Name", "Organisation Name", "Location", "Pin Code"
+        ]
+        if not any(k in raw_pairs for k in substantive_keys) and not tender_doc_url:
+            return None
+
+        work_desc = (
+            raw_pairs.get("Work Description")
+            or raw_pairs.get("Tender Title")
+            or raw_pairs.get("Product Category")
+            or ""
+        )
+
+        return {
+            "tender_fee": raw_pairs.get("Tender Fee") or raw_pairs.get("Tender Fee in ₹") or "0",
+            "emd": raw_pairs.get("EMD") or raw_pairs.get("EMD Amount in ₹") or "0",
+            "tender_document_url": tender_doc_url or "N/A",
+            "work_description": work_desc,
+            "location": raw_pairs.get("Location") or raw_pairs.get("Pin Code") or "",
+            "tender_type": raw_pairs.get("Tender Type") or "",
+            "tender_category": raw_pairs.get("Tender Category") or "",
+            "product_category": raw_pairs.get("Product Category") or "",
+            "doc_download_start_date": raw_pairs.get("Document Download Start Date") or "",
+            "doc_download_end_date": raw_pairs.get("Document Download End Date") or "",
+            "bid_submission_start_date": raw_pairs.get("Bid Submission Start Date") or raw_pairs.get("Bid Start Date") or "",
+            "bid_submission_end_date": raw_pairs.get("Bid Submission End Date") or raw_pairs.get("Bid End Date") or "",
+            "bid_opening_date": raw_pairs.get("Bid Opening Date") or "",
+            "authority_name": raw_pairs.get("Name") or raw_pairs.get("Buyer Name") or "",
+            "authority_address": raw_pairs.get("Address") or "",
+            "details_fetched": 1,
+        }
+
+    def fetch_tender_details_interactively(
+        self,
+        tender_url: str,
+        tender_id: str = "",
+        tender_title: str = ""
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch and parse full tender details from CPPP or GeM.
+        Prompts for CAPTCHA if needed (Central/State), or fetches directly without CAPTCHA (GeM).
+        Returns None on skip or failure, raises KeyboardInterrupt on quit.
+        """
+        if not tender_url:
+            return None
+
+        disp_title = (tender_title[:65] + "...") if len(tender_title) > 65 else tender_title
+        print(f"\n---> Fetching Details for Tender ID: {tender_id}")
+        if disp_title:
+            print(f"     Title: {disp_title}")
+
+        # Case A: GeM Bid details - no CAPTCHA needed
+        if "gemtendersfullview" in tender_url:
+            logger.debug(f"Fetching GeM details directly: {tender_url}")
+            resp = self.fetch_page_html(tender_url)
+            if resp:
+                details = self.parse_tender_details_html(resp)
+                if details:
+                    print("[✓] GeM Bid details successfully retrieved.")
+                    return details
+            print(f"  [!] Unable to load GeM bid details for {tender_id}.")
+            return None
+
+        # Case B: Central / State tender details - requires solving CAPTCHA
+        portal = "states" if "tendersfullviewmmp" in tender_url else "central"
+        self.ensure_session(portal)
+
+        portal_referer = CPPP_STATES_URL if portal == "states" else CPPP_CENTRAL_URL
+        refreshed_url = self.refresh_tender_url(tender_url)
+
+        headers = dict(DEFAULT_HEADERS)
+        headers["Referer"] = portal_referer
+
+        while True:
+            resp = self.session.get(refreshed_url, headers=headers, timeout=self.timeout)
+            if resp.status_code != 200:
+                logger.error(f"HTTP {resp.status_code} loading tender detail: {refreshed_url}")
+                return None
+
+            # Check if CPPP rejected refreshed URL (e.g. Invalid Url)
+            if "Invalid Url" in resp.text:
+                logger.debug(f"Refreshed URL returned Invalid Url. Trying original URL: {tender_url}")
+                resp_orig = self.session.get(tender_url, headers=headers, timeout=self.timeout)
+                if "Invalid Url" not in resp_orig.text and ("form" in resp_orig.text or "Tender Details" in resp_orig.text):
+                    resp = resp_orig
+                    refreshed_url = tender_url
+                else:
+                    print(f"  [!] Tender {tender_id} detail page is no longer active on CPPP (tender may be closed/archived).")
+                    return None
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            form = soup.find("form")
+            if not form:
+                # If detail tables already exist without form, parse directly
+                if any(m in resp.text for m in ["Organisation Details", "Tender Details", "Critical Dates", "Work Details"]):
+                    parsed = self.parse_tender_details_html(resp.text)
+                    if parsed:
+                        print("[✓] Details successfully retrieved directly.")
+                        return parsed
+                print(f"  [!] No detail form found on page for {tender_id}.")
+                return None
+
+            captcha_input = form.find("input", {"name": "captcha_response"})
+            if not captcha_input:
+                # Rendered directly without captcha
+                parsed = self.parse_tender_details_html(resp.text)
+                if parsed:
+                    print("[✓] Details successfully retrieved directly.")
+                    return parsed
+                print(f"  [!] Tender form without CAPTCHA contained no detail data for {tender_id}.")
+                return None
+
+            form_inputs = {i.get("name"): i.get("value", "") for i in form.find_all("input") if i.get("name")}
+            img = form.find("img")
+            if not img or not img.get("src"):
+                logger.error("No CAPTCHA image found on tender page.")
+                return None
+
+            img_src = img["src"]
+            if img_src.startswith("/"):
+                img_src = f"{BASE_URL}{img_src}"
+
+            captcha_val = self.prompt_captcha_input(img_src, temp_file="detail_captcha.png")
+            if not captcha_val:
+                # Refresh
+                refreshed_url = self.refresh_tender_url(tender_url)
+                continue
+
+            if captcha_val == "__SKIP__":
+                print(f"[*] Skipping detail extraction for {tender_id}.")
+                return None
+
+            if captcha_val == "__QUIT__":
+                print("[*] Quitting detail extraction as requested.")
+                raise KeyboardInterrupt
+
+            action = form.get("action", "")
+            action_url = f"{BASE_URL}{action}" if action.startswith("/") else (action or refreshed_url)
+            payload = dict(form_inputs)
+            payload["captcha_response"] = captcha_val
+            payload["op"] = "Submit"
+
+            post_headers = dict(headers)
+            post_headers["Referer"] = refreshed_url
+
+            post_resp = self.session.post(action_url, data=payload, headers=post_headers, timeout=self.timeout)
+
+            # Check 1: Incorrect CAPTCHA code
+            if "CAPTCHA was not correct" in post_resp.text or "messages error" in post_resp.text:
+                print("[!] Incorrect CAPTCHA code entered. Retrying with fresh code...")
+                refreshed_url = self.refresh_tender_url(tender_url)
+                continue
+
+            # Check 2: Invalid parameter or URL error
+            if "Invalid parameter" in post_resp.text or "Invalid Url" in post_resp.text:
+                print("[!] CPPP rejected request (Invalid parameter/URL). Re-establishing session and retrying...")
+                self._active_sessions.discard(portal)
+                self.ensure_session(portal)
+                refreshed_url = self.refresh_tender_url(tender_url)
+                continue
+
+            # Check 3: Form was re-rendered (still asking for CAPTCHA)
+            if '<input name="captcha_response"' in post_resp.text:
+                print("[!] Server re-rendered CAPTCHA form. Retrying...")
+                refreshed_url = self.refresh_tender_url(tender_url)
+                continue
+
+            # Check 4: Must contain actual detail markers
+            if not any(m in post_resp.text for m in ["Organisation Details", "Tender Details", "Critical Dates", "Work Details"]):
+                print(f"  [!] Detail tables not found in server response for {tender_id}.")
+                return None
+
+            details = self.parse_tender_details_html(post_resp.text)
+            if not details:
+                print(f"  [!] Failed to parse detail tables for {tender_id}.")
+                return None
+
+            print("[✓] CAPTCHA accepted! Details successfully retrieved.")
+            return details
 
     def extract_total_tenders(self, html: str) -> int:
         """Parse total tenders or bids count displayed on CPPP."""

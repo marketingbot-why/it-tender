@@ -116,13 +116,21 @@ class ITFilter:
                 exclusion_found.append(exc)
 
         if exclusion_found:
-            # If exclusion matches and no strong IT keywords, penalize heavily
-            if len(specific_it_keywords) <= 1 and not matched_orgs:
+            # If explicit exclusion matches and no strong technical IT project keywords (e.g. software, server, cloud)
+            strong_it = [
+                k for k in specific_it_keywords
+                if k not in {"it", "ict", "information technology", "networking"}
+            ]
+            if len(strong_it) == 0:
+                score = 0.0
+                matched_categories = []
+                matched_keywords = []
+            else:
                 score -= 0.6
 
         # Cap score between 0.0 and 1.0
         confidence = max(0.0, min(1.0, round(score, 2)))
-        is_it = confidence >= 0.35 and len(matched_keywords) > 0 or (len(matched_orgs) > 0 and confidence >= 0.3)
+        is_it = (confidence >= 0.35 and len(matched_keywords) > 0) or (len(matched_orgs) > 0 and confidence >= 0.3 and len(matched_categories) > 0)
 
         reasons = []
         if matched_keywords:

@@ -97,6 +97,28 @@ def main():
         help="Additional custom keyword(s) for GeM or classification"
     )
     parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Fetch full tender details (Fee, EMD, Document URL, etc.) interactively during live scraping"
+    )
+    parser.add_argument(
+        "--fetch-details",
+        action="store_true",
+        help="Enrich existing database tenders by fetching full tender details (Fee, EMD, Document URL)"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of tenders to enrich when running --fetch-details"
+    )
+    parser.add_argument(
+        "--tender-id",
+        type=str,
+        default=None,
+        help="Enrich a specific Tender ID only when running --fetch-details"
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Display current database statistics and exit"
@@ -125,8 +147,9 @@ def main():
     if args.stats:
         stats = storage.get_stats()
         print(f"Database: {args.db}")
-        print(f"Total Tenders Stored: {stats['total_tenders']:,}")
-        print(f"IT Tenders Stored   : {stats['it_tenders']:,}")
+        print(f"Total Tenders Stored : {stats['total_tenders']:,}")
+        print(f"IT Tenders Stored     : {stats['it_tenders']:,}")
+        print(f"Details Enriched      : {stats.get('details_fetched', 0):,}")
         print("\nBreakdown by IT Category:")
         for cat, count in stats["categories"].items():
             print(f"  - {cat:32s}: {count}")
@@ -134,6 +157,93 @@ def main():
 
     custom_kw = [k.strip() for k in args.keywords.split(",")] if args.keywords else None
     scraper = EprocureScraper(delay=args.delay, custom_keywords=custom_kw)
+
+    if args.fetch_details:
+        # Reset any corrupt records that were marked fetched with empty details
+        storage.reset_unpopulated_details()
+
+        tenders_to_enrich = storage.get_tenders(
+            only_it=True,
+            needs_details_only=True,
+            tender_id=args.tender_id,
+            limit=args.limit
+        )
+
+        if not tenders_to_enrich:
+            if args.tender_id:
+                print(f"[*] No pending details needed for Tender ID '{args.tender_id}'.")
+            else:
+                print("[*] All IT tenders in database already have details enriched (or none match).")
+            return
+
+        print(f"[*] Found {len(tenders_to_enrich)} tender(s) needing detail enrichment.")
+        print("[*] Interactive mode: Preview opens CAPTCHA image, enter solution in terminal.")
+        print("    [code] = submit, 'r' = refresh, 's' = skip tender, 'q' = quit\n")
+
+        enriched_count = 0
+        skipped_count = 0
+
+        try:
+            for idx, tender in enumerate(tenders_to_enrich, 1):
+                tid = tender["tender_id"]
+                turl = tender.get("tender_url", "")
+                title = tender.get("title", "")
+                print(f"\n[{idx}/{len(tenders_to_enrich)}] Target: {tid} | {tender.get('organisation', '')[:40]}")
+                print(f"       Title: {title[:75]}...")
+
+                if not turl:
+                    print("  [!] No tender_url available. Skipping...")
+                    skipped_count += 1
+                    continue
+
+                details = scraper.fetch_tender_details_interactively(
+                    tender_url=turl,
+                    tender_id=tid,
+                    tender_title=title
+                )
+
+                if details:
+                    storage.update_tender_details(tid, details)
+                    enriched_count += 1
+                    print(f"  [✓] Enriched {tid}:")
+                    print(f"      - Tender Fee : {details.get('tender_fee', 'N/A')}")
+                    print(f"      - EMD Amount : {details.get('emd', 'N/A')}")
+                    print(f"      - Doc URL    : {details.get('tender_document_url', 'N/A')}")
+                    if details.get("work_description"):
+                        disp_desc = details.get("work_description")
+                        disp_desc = (disp_desc[:65] + "...") if len(disp_desc) > 65 else disp_desc
+                        print(f"      - Work Desc  : {disp_desc}")
+                    if details.get("location"):
+                        print(f"      - Location   : {details.get('location')}")
+                    if details.get("bid_submission_end_date"):
+                        print(f"      - End Date   : {details.get('bid_submission_end_date')}")
+                    if details.get("authority_name"):
+                        print(f"      - Authority  : {details.get('authority_name')}")
+                else:
+                    print(f"  [!] Skipped / detail extraction failed for {tid}.")
+                    skipped_count += 1
+
+        except KeyboardInterrupt:
+            print("\n[!] Detail enrichment interrupted by user.")
+
+        # Export updated records
+        export_path = args.output
+        if export_path.endswith(".json"):
+            exported_count = storage.export_to_json(export_path, only_it=True)
+        else:
+            if not export_path.endswith(".csv"):
+                export_path += ".csv"
+            exported_count = storage.export_to_csv(export_path, only_it=True)
+
+        print("\n" + "=" * 60)
+        print("               ENRICHMENT SUMMARY")
+        print("=" * 60)
+        print(f"Enriched Tenders    : {enriched_count}")
+        print(f"Skipped / Failed    : {skipped_count}")
+        print(f"Exported to File    : {export_path} ({exported_count} records)")
+        print(f"Database            : {args.db}")
+        print("=" * 60)
+        return
 
     sources_to_scrape = list(SOURCES.keys()) if args.source == "all" else [args.source]
     max_pages = None if args.all_pages else args.pages
@@ -176,6 +286,20 @@ def main():
                                 kw_matches += 1
                                 print(f"  [+] [MATCH] [{tender.get('search_category')}] {tender['title'][:70]}...")
                                 print(f"      ID: {tender['tender_id']} | Org: {tender['organisation'][:45]} | Closes: {tender['closing_date']}")
+                                if args.details and tender.get("tender_url"):
+                                    try:
+                                        details = scraper.fetch_tender_details_interactively(
+                                            tender_url=tender["tender_url"],
+                                            tender_id=tender["tender_id"],
+                                            tender_title=tender["title"]
+                                        )
+                                        if details:
+                                            tender.update(details)
+                                            print(f"      Fee: {details.get('tender_fee', 'N/A')} | EMD: {details.get('emd', 'N/A')} | Doc: {details.get('tender_document_url', 'N/A')[:60]}")
+                                    except KeyboardInterrupt:
+                                        raise
+                                    except Exception as e:
+                                        logging.warning(f"Failed to fetch details for {tender['tender_id']}: {e}")
                             is_new = storage.save_tender(tender)
                             if is_new:
                                 total_new_saved += 1
@@ -205,6 +329,20 @@ def main():
                                 cat_matches += 1
                                 print(f"  [+] [MATCH] [{tender.get('search_category')}] {tender['title'][:70]}...")
                                 print(f"      ID: {tender['tender_id']} | Org: {tender['organisation'][:45]} | Closes: {tender['closing_date']}")
+                                if args.details and tender.get("tender_url"):
+                                    try:
+                                        details = scraper.fetch_tender_details_interactively(
+                                            tender_url=tender["tender_url"],
+                                            tender_id=tender["tender_id"],
+                                            tender_title=tender["title"]
+                                        )
+                                        if details:
+                                            tender.update(details)
+                                            print(f"      Fee: {details.get('tender_fee', 'N/A')} | EMD: {details.get('emd', 'N/A')} | Doc: {details.get('tender_document_url', 'N/A')[:60]}")
+                                    except KeyboardInterrupt:
+                                        raise
+                                    except Exception as e:
+                                        logging.warning(f"Failed to fetch details for {tender['tender_id']}: {e}")
                             is_new = storage.save_tender(tender)
                             if is_new:
                                 total_new_saved += 1
@@ -221,6 +359,20 @@ def main():
                         cats = ", ".join(tender.get("categories", [])) or "IT Project"
                         print(f"  [+] [MATCH] [{cats}] {tender['title'][:70]}...")
                         print(f"      ID: {tender['tender_id']} | Org: {tender['organisation'][:45]} | Closes: {tender['closing_date']}")
+                        if args.details and tender.get("tender_url"):
+                            try:
+                                details = scraper.fetch_tender_details_interactively(
+                                    tender_url=tender["tender_url"],
+                                    tender_id=tender["tender_id"],
+                                    tender_title=tender["title"]
+                                )
+                                if details:
+                                    tender.update(details)
+                                    print(f"      Fee: {details.get('tender_fee', 'N/A')} | EMD: {details.get('emd', 'N/A')} | Doc: {details.get('tender_document_url', 'N/A')[:60]}")
+                            except KeyboardInterrupt:
+                                raise
+                            except Exception as e:
+                                logging.warning(f"Failed to fetch details for {tender['tender_id']}: {e}")
                     is_new = storage.save_tender(tender)
                     if is_new:
                         total_new_saved += 1

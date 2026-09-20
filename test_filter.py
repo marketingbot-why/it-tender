@@ -95,6 +95,16 @@ class TestITScraper(unittest.TestCase):
                 "title": "Hiring of 50 seated bus for local transport of school children",
                 "organisation": "Airports Authority of India",
                 "tender_ref_no": "AAI/BUS/26",
+            },
+            {
+                "title": "E-Tender for execution of New OFC Development Replacement works and Laying of OFC cable in Jammu",
+                "organisation": "Bharat Sanchar Nigam Limited",
+                "tender_ref_no": "BSNL/OFC/2026",
+            },
+            {
+                "title": "Trenching and laying of optical fiber cable along national highway",
+                "organisation": "RailTel Corporation of India",
+                "tender_ref_no": "RCIL/OFC/2026",
             }
         ]
 
@@ -159,8 +169,10 @@ class TestITScraper(unittest.TestCase):
             "Civil Works - Roads",
             "Info. Tech. Services",
             "Information Technology (IT)",
+            "Information Technology/Telecom",
             "Hotel/ Catering Services",
             "Computer Software/Web Site",
+            "Computer Hardware",
             "Network /Communication Equipments",
             "Air Conditioner Services",
             "OFC Laying Works"
@@ -169,8 +181,10 @@ class TestITScraper(unittest.TestCase):
         self.assertIn("Info. Tech. Services", matched)
         self.assertIn("Information Technology (IT)", matched)
         self.assertIn("Computer Software/Web Site", matched)
-        self.assertIn("Network /Communication Equipments", matched)
-        self.assertIn("OFC Laying Works", matched)
+        self.assertNotIn("Computer Hardware", matched)
+        self.assertNotIn("Network /Communication Equipments", matched)
+        self.assertNotIn("Information Technology/Telecom", matched)
+        self.assertNotIn("OFC Laying Works", matched)
         self.assertNotIn("Civil Works", matched)
         self.assertNotIn("Civil Works - Roads", matched)
         self.assertNotIn("Hotel/ Catering Services", matched)
@@ -219,6 +233,210 @@ class TestITScraper(unittest.TestCase):
         self.assertEqual(count_json, 1)
         self.assertTrue(os.path.exists(json_path))
 
+    def test_refresh_tender_url(self):
+        import base64
+        import time
+
+        old_ts = 1600000000
+        old_b64 = base64.b64encode(str(old_ts).encode("utf-8")).decode("utf-8")
+        stale_url = f"https://eprocure.gov.in/cppp/tendersfullview/seg1A13h1seg2A13h1seg3A13h1{old_b64}A13h1seg5A13h1seg6"
+
+        refreshed = EprocureScraper.refresh_tender_url(stale_url)
+        self.assertNotEqual(refreshed, stale_url)
+        parts = refreshed.split("A13h1")
+        self.assertEqual(len(parts), 6)
+        self.assertEqual(parts[0], "https://eprocure.gov.in/cppp/tendersfullview/seg1")
+        self.assertEqual(parts[1], "seg2")
+        self.assertEqual(parts[2], "seg3")
+        self.assertEqual(parts[4], "seg5")
+        self.assertEqual(parts[5], "seg6")
+
+        # Verify new timestamp
+        new_ts_str = base64.b64decode(parts[3]).decode("utf-8")
+        self.assertTrue(new_ts_str.isdigit())
+        self.assertTrue(abs(time.time() - int(new_ts_str)) < 10)
+
+        # URLs without delimiter should return unchanged
+        normal_url = "https://eprocure.gov.in/cppp/latestactivetendersnew/cpppdata"
+        self.assertEqual(EprocureScraper.refresh_tender_url(normal_url), normal_url)
+
+    def test_parse_tender_details_html(self):
+        import base64
+
+        encoded_doc_url = base64.b64encode(b"https://bpcltenders.eproc.in/tender_docs/doc_123.pdf").decode("utf-8")
+        sample_detail_html = f"""
+        <html>
+        <body>
+            <table>
+                <tr>
+                    <td>Tender Fee in ₹</td><td>:</td><td>1,500</td>
+                    <td>EMD Amount in ₹</td><td>:</td><td>50,000</td>
+                </tr>
+                <tr>
+                    <td>Work Description</td><td>:</td><td>Implementation of Enterprise Cloud CRM</td>
+                    <td>Location</td><td>:</td><td>New Delhi</td>
+                </tr>
+                <tr>
+                    <td>Tender Type</td><td>:</td><td>Open Tender</td>
+                    <td>Tender Category</td><td>:</td><td>Services</td>
+                </tr>
+                <tr>
+                    <td>Product Category</td><td>:</td><td>Information Technology Services</td>
+                    <td>Bid Submission End Date</td><td>:</td><td>15-Oct-2026 05:00 PM</td>
+                </tr>
+                <tr>
+                    <td>Name</td><td>:</td><td>Chief Information Officer</td>
+                    <td>Address</td><td>:</td><td>CGO Complex, Lodhi Road, New Delhi</td>
+                </tr>
+                <tr>
+                    <td>Tender Document</td><td>:</td><td><a href="/cppp/tenderredirect/by/{encoded_doc_url}">Download Document</a></td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+        scraper = EprocureScraper()
+        details = scraper.parse_tender_details_html(sample_detail_html)
+
+        self.assertEqual(details["tender_fee"], "1,500")
+        self.assertEqual(details["emd"], "50,000")
+        self.assertEqual(details["tender_document_url"], "https://bpcltenders.eproc.in/tender_docs/doc_123.pdf")
+        self.assertEqual(details["work_description"], "Implementation of Enterprise Cloud CRM")
+        self.assertEqual(details["location"], "New Delhi")
+        self.assertEqual(details["tender_type"], "Open Tender")
+        self.assertEqual(details["tender_category"], "Services")
+        self.assertEqual(details["product_category"], "Information Technology Services")
+        self.assertEqual(details["bid_submission_end_date"], "15-Oct-2026 05:00 PM")
+        self.assertEqual(details["authority_name"], "Chief Information Officer")
+        self.assertEqual(details["authority_address"], "CGO Complex, Lodhi Road, New Delhi")
+        self.assertEqual(details["details_fetched"], 1)
+
+    def test_storage_tender_details_enrichment(self):
+        sample = {
+            "tender_id": "TEST_TENDER_DETAIL_001",
+            "title": "Data Center Migration",
+            "tender_ref_no": "NIC/DC/2026",
+            "organisation": "National Informatics Centre",
+            "published_date": "10-Sep-2026 10:00 AM",
+            "closing_date": "30-Sep-2026 05:00 PM",
+            "opening_date": "01-Oct-2026 11:00 AM",
+            "corrigendum": "--",
+            "tender_url": "https://eprocure.gov.in/cppp/tendersfullview/test",
+            "source": "central",
+            "is_it_tender": True,
+            "categories": ["Cloud & Data Center"],
+            "matched_keywords": ["data center"],
+            "confidence": 0.9,
+            "reason": "Keywords: data center"
+        }
+        self.storage.save_tender(sample)
+
+        # Before enrichment: needs_details_only should return 1
+        pending = self.storage.get_tenders(needs_details_only=True)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["tender_id"], "TEST_TENDER_DETAIL_001")
+        self.assertIsNone(pending[0]["tender_fee"])
+
+        # Enrich details
+        details = {
+            "tender_fee": "2,000",
+            "emd": "1,00,000",
+            "tender_document_url": "https://eprocure.gov.in/docs/rfp.pdf",
+            "location": "New Delhi",
+            "authority_name": "Project Director",
+            "authority_address": "NIC HQ, CGO Complex",
+            "bid_submission_end_date": "30-Sep-2026 05:00 PM"
+        }
+        updated = self.storage.update_tender_details("TEST_TENDER_DETAIL_001", details)
+        self.assertTrue(updated)
+
+        # After enrichment: needs_details_only should return 0
+        pending_after = self.storage.get_tenders(needs_details_only=True)
+        self.assertEqual(len(pending_after), 0)
+
+        # Check stored fields
+        tenders = self.storage.get_tenders(tender_id="TEST_TENDER_DETAIL_001")
+        self.assertEqual(len(tenders), 1)
+        t = tenders[0]
+        self.assertEqual(t["tender_fee"], "2,000")
+        self.assertEqual(t["emd"], "1,00,000")
+        self.assertEqual(t["tender_document_url"], "https://eprocure.gov.in/docs/rfp.pdf")
+        self.assertEqual(t["location"], "New Delhi")
+        self.assertEqual(t["authority_name"], "Project Director")
+        self.assertEqual(t["details_fetched"], 1)
+
+        # Check stats
+        stats = self.storage.get_stats()
+        self.assertEqual(stats["details_fetched"], 1)
+
+    def test_parse_tender_details_error_pages(self):
+        scraper = EprocureScraper()
+
+        # Error pages must return None instead of corrupt default zeroes
+        self.assertIsNone(scraper.parse_tender_details_html(""), "Empty string must return None")
+        self.assertIsNone(scraper.parse_tender_details_html("<h4>Invalid Url.Please Check</h4>"), "Invalid Url must return None")
+        self.assertIsNone(scraper.parse_tender_details_html('<table width="100%"><tr><td><h4 align="center">Invalid parameter</h4></td></tr></table>'), "Invalid parameter must return None")
+        self.assertIsNone(scraper.parse_tender_details_html("<html><body><p>Some random content</p></body></html>"), "Page without details must return None")
+
+    def test_reset_unpopulated_details(self):
+        # Insert a corrupt tender that was falsely marked details_fetched=1 with empty fields
+        corrupt_tender = {
+            "tender_id": "CORRUPT_001",
+            "title": "Corrupt IT Tender",
+            "tender_ref_no": "CORRUPT/2026",
+            "organisation": "Sample Org",
+            "published_date": "10-Sep-2026",
+            "closing_date": "30-Sep-2026",
+            "opening_date": "01-Oct-2026",
+            "tender_url": "https://eprocure.gov.in/cppp/tendersfullview/corrupt",
+            "source": "central",
+            "is_it_tender": True,
+            "tender_fee": "0",
+            "emd": "0",
+            "tender_document_url": "N/A",
+            "work_description": "",
+            "location": "",
+            "details_fetched": 1
+        }
+        self.storage.save_tender(corrupt_tender)
+
+        # Insert a legitimately enriched tender
+        legit_tender = {
+            "tender_id": "LEGIT_001",
+            "title": "Legit IT Tender",
+            "tender_ref_no": "LEGIT/2026",
+            "organisation": "Sample Org",
+            "published_date": "10-Sep-2026",
+            "closing_date": "30-Sep-2026",
+            "opening_date": "01-Oct-2026",
+            "tender_url": "https://eprocure.gov.in/cppp/tendersfullview/legit",
+            "source": "central",
+            "is_it_tender": True,
+            "tender_fee": "1,000",
+            "emd": "50,000",
+            "tender_document_url": "https://eprocure.gov.in/doc.pdf",
+            "work_description": "Legitimate work description for IT project",
+            "location": "New Delhi",
+            "details_fetched": 1
+        }
+        self.storage.save_tender(legit_tender)
+
+        # Run reset
+        reset_count = self.storage.reset_unpopulated_details()
+        self.assertEqual(reset_count, 1)
+
+        # Verify corrupt record was reset
+        corrupt = self.storage.get_tenders(tender_id="CORRUPT_001")[0]
+        self.assertEqual(corrupt["details_fetched"], 0)
+        self.assertIsNone(corrupt["tender_fee"])
+
+        # Verify legit record was preserved
+        legit = self.storage.get_tenders(tender_id="LEGIT_001")[0]
+        self.assertEqual(legit["details_fetched"], 1)
+        self.assertEqual(legit["tender_fee"], "1,000")
+        self.assertEqual(legit["work_description"], "Legitimate work description for IT project")
+
 
 if __name__ == "__main__":
     unittest.main()
+
